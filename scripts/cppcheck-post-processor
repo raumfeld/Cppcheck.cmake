@@ -1,0 +1,107 @@
+#!/usr/bin/env python
+
+#
+# Script to post-process the results of a cppcheck run
+#
+#
+import sys
+import os
+import argparse
+import xml.etree.ElementTree as ET
+
+
+def prune(args):
+    tree = ET.parse(args.filename)
+    root = tree.getroot()
+    errors_el = root.find('errors')
+    remove_missing_includes = args.remove_missing_includes.split(';')
+    for e in errors_el.findall('error'):
+        for header in remove_missing_includes:
+            if e.attrib['id'] == 'missingInclude' and (
+                    header != '' and header in e.attrib['msg']):
+                errors_el.remove(e)
+                break
+        else:
+            for spec in args.to_prune:
+                error_id, msg = spec.split(':')
+                if e.attrib['id'] == error_id and msg in e.attrib['msg']:
+                    errors_el.remove(e)
+                    break
+    tree.write(args.filename)
+
+def separate_unused_functions(args):
+    module_roots = {}
+
+    def get_module_name(el):
+        loc = el.attrib['file']
+        return loc.split(os.path.sep)[0]
+
+    def get_root_for_module(module, results_version=None,
+                            cppcheck_version=None):
+        if module in module_roots:
+            return module_roots[module]
+        else:
+           root = ET.Element('results')
+           root.set('version', results_version)
+           cppcheck = ET.SubElement(root, 'cppcheck')
+           cppcheck.set('version', cppcheck_version)
+           errors = ET.SubElement(root, 'errors')
+           module_roots[module] = root
+           return root
+
+    root = ET.parse(args.filename).getroot()
+    results_version = root.attrib['version']
+    cppcheck_el = root.find('cppcheck')
+    cppcheck_version = cppcheck_el.attrib['version']
+    errors_el = root.find('errors')
+    for e in errors_el.findall('error'):
+        if e.attrib['id'] == 'unusedFunction':
+            location_el = e.find('location')
+            module_name = get_module_name(e.find('location'))
+            module_root = get_root_for_module(
+                    module_name,
+                    results_version,
+                    cppcheck_version)
+            module_errors = module_root.find('errors')
+            if args.project_root:
+                location_el.attrib['file'] =  os.path.join(
+                        args.project_root,
+                        location_el.attrib['file'])
+            module_errors.append(e)
+
+    for module_name, module_root in module_roots.iteritems():
+        module_tree = ET.ElementTree(module_root)
+        module_tree.write(module_name + '-unused-functions.xml',
+                   encoding='UTF-8',
+                   xml_declaration=True,
+                   method='xml')
+
+
+parser = argparse.ArgumentParser(
+        description='Cppcheck results post-processor')
+
+subparsers = parser.add_subparsers()
+
+parser_prune = subparsers.add_parser('prune', help='Remove warnings')
+parser_prune.add_argument(
+        '--prune-specs', nargs='*', dest='to_prune', default=[],
+        help='Warning to prune in the form <error_id>:<message>')
+parser_prune.add_argument(
+        '--remove-missing-includes', action='store', default='',
+        help='Remove missing include warning for the header')
+parser_prune.set_defaults(func=prune)
+
+parser_unused_functions = subparsers.add_parser(
+        'separate-unused-functions',
+        help='Separate unused functions')
+parser_unused_functions.add_argument(
+        '--project-root', action='store',
+        dest='project_root',
+        help='Absolute path to the sources directory')
+parser_unused_functions.set_defaults(func=separate_unused_functions)
+
+parser.add_argument('filename', action="store",
+                    help='XML file with the cppcheck results')
+
+args = parser.parse_args()
+args.func(args)

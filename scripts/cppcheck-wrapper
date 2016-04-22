@@ -1,0 +1,48 @@
+#!/bin/sh
+
+# Wrapper script for the CppcheckTargets CMake module
+#
+# This wrapper script is required because the targets' property
+# INCLUDE_DIRECTORIES is a list that can contain generators that refer
+# to even more lists of include directories when evaluated.
+#
+# We need the generators evaluated to be able to build the cppcheck
+# command line for the include directories.
+#
+# For convenience, this wrapper script also runs a tool to post-process
+# the cppcheck results.
+set -eu
+
+cppcheck_exec="$1"        && shift
+check_config="$1"         && shift
+includes="$1"             && shift
+header_exclusions="$1"    && shift
+report_file="$1"          && shift
+
+OLD_IFS="$IFS"
+IFS=\;
+parsed_includes=
+for inc in $includes; do
+    if [ "$inc" ] && [ "$inc" != "_cppcheck_includes-NOTFOUND" ]; then
+        canonical_path="$(readlink -f "$inc")"
+        parsed_includes=$(echo $parsed_includes -I$canonical_path)
+    fi
+done
+IFS="$OLD_IFS"
+
+mkdir -p "$(dirname "$report_file")"
+
+$cppcheck_exec $parsed_includes $@ 2> "${report_file}".xml
+
+if "$check_config"; then
+    $cppcheck_exec --check-config $parsed_includes $@ 2> "${report_file}"-config-check.xml
+
+    # If the analysis was ran using the --check-config option, all
+    # configuration errors will be shown, so this error message is noise.
+    "$(dirname "$0")"/cppcheck-post-processor prune \
+            --prune-specs missingInclude:"Cppcheck cannot find all the include files" \
+            "${report_file}".xml
+    "$(dirname "$0")"/cppcheck-post-processor prune \
+            --remove-missing-includes "$header_exclusions" \
+            "${report_file}"-config-check.xml
+fi
